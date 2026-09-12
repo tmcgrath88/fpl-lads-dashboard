@@ -10,10 +10,37 @@ from fpl_api import (
 PROMOTED_TEAMS_SEPTEMBER = ["Ipswich Town", "Hull City", "Coventry City"]
 LONDON_TEAMS = ["Arsenal", "Chelsea", "Crystal Palace", "Fulham", "Spurs", "Brentford", "West Ham"]
 
-# Best-effort list of Irish / Scottish / Welsh players in this season's PL squads.
-# NOT sourced from the FPL API (it has no public nationality field) - needs
-# confirmation/correction from the league before the March table can be trusted.
-IRISH_SCOTTISH_WELSH_PLAYERS = []
+# Irish / Scottish / Welsh players eligible for the March rule, confirmed against
+# the live FPL player pool by (first_name, second_name) - matched by element id
+# rather than name/web_name, since several web_names collide with unrelated
+# players (e.g. three different players share the web_name "Wilson").
+# Not sourced from the FPL API itself (it has no nationality field) - this list
+# came from the league and was cross-checked against this season's squads.
+# The following names supplied by the league were NOT found in this season's
+# player pool and are excluded: Eiran Cashin, Alan Browne, Tayo Adaramola,
+# Billy Gilmour, Jordan James.
+IRISH_SCOTTISH_WELSH_PLAYERS = [
+    ("Caoimhín", "Kelleher"), ("Nathan", "Collins"), ("Evan", "Ferguson"), ("Mark", "Travers"),
+    ("Jake", "O'Brien"), ("John", "Egan"), ("Dara", "O'Shea"), ("Kasey", "McAteer"),
+    ("Jack", "Taylor"), ("Chiedozie", "Ogbene"),
+    ("John", "McGinn"), ("Andrew", "Robertson"), ("Ryan", "Christie"), ("Aaron", "Hickey"),
+    ("Nathan", "Patterson"), ("Ben", "Gannon-Doak"),
+    ("Brennan", "Johnson"), ("Neco", "Williams"), ("Harry", "Wilson"), ("Daniel", "James"),
+    ("Joe", "Rodon"), ("Ben", "Davies"), ("Lewis", "Koumas"), ("Ethan", "Ampadu"),
+]
+
+
+def _resolve_player_ids(name_pairs):
+    bs = get_bootstrap()
+    ids = []
+    for first, last in name_pairs:
+        match = next(
+            (e for e in bs["elements"] if e["first_name"] == first and e["second_name"] == last),
+            None,
+        )
+        if match:
+            ids.append(match["id"])
+    return ids
 
 
 def rule_team_points(entry_ids, events, team_names, scope="starting_xi"):
@@ -57,11 +84,14 @@ def rule_team_points(entry_ids, events, team_names, scope="starting_xi"):
     return results, breakdown
 
 
-def rule_named_players_points(entry_ids, events, player_names, scope="starting_xi"):
-    """Same as rule_team_points but filtering by player web_name instead of club."""
+def rule_player_ids_points(entry_ids, events, element_ids, scope="starting_xi"):
+    """Same as rule_team_points but filtering by exact player id instead of club.
+
+    Filtering by id (rather than name/web_name) avoids collisions between
+    different players who happen to share a surname or web_name.
+    """
     bs = get_bootstrap()
-    target_names = set(player_names)
-    elem_in_scope = {e["id"] for e in bs["elements"] if e["web_name"] in target_names}
+    elem_in_scope = set(element_ids)
     elem_name = {e["id"]: e["web_name"] for e in bs["elements"]}
 
     live_points = {}
@@ -274,13 +304,11 @@ MONTH_RULES = {
     "March": {
         "description": "Highest points from Irish, Scottish and Welsh players.",
         "warning": (
-            "Player eligibility list is not populated yet. The FPL API has no nationality field, "
-            "so this list has to be manually maintained — everyone will show 0 until it's filled in."
-            if not IRISH_SCOTTISH_WELSH_PLAYERS
-            else None
+            "5 names supplied by the league weren't found in this season's player pool and are "
+            "excluded: Eiran Cashin, Alan Browne, Tayo Adaramola, Billy Gilmour, Jordan James."
         ),
-        "compute": lambda entry_ids, events: rule_named_players_points(
-            entry_ids, events, IRISH_SCOTTISH_WELSH_PLAYERS, scope="starting_xi"
+        "compute": lambda entry_ids, events: rule_player_ids_points(
+            entry_ids, events, _resolve_player_ids(IRISH_SCOTTISH_WELSH_PLAYERS), scope="starting_xi"
         ),
     },
     "April": {
