@@ -1,6 +1,19 @@
-from fpl_api import get_bootstrap, get_event_live, get_entry_picks
+from fpl_api import (
+    get_bootstrap,
+    get_entry_history,
+    get_entry_picks,
+    get_event_live,
+    get_month_to_events,
+    get_playable_events,
+)
 
 PROMOTED_TEAMS_SEPTEMBER = ["Ipswich Town", "Hull City", "Coventry City"]
+LONDON_TEAMS = ["Arsenal", "Chelsea", "Crystal Palace", "Fulham", "Spurs", "Brentford", "West Ham"]
+
+# Best-effort list of Irish / Scottish / Welsh players in this season's PL squads.
+# NOT sourced from the FPL API (it has no public nationality field) - needs
+# confirmation/correction from the league before the March table can be trusted.
+IRISH_SCOTTISH_WELSH_PLAYERS = []
 
 
 def rule_team_points(entry_ids, events, team_names, scope="starting_xi"):
@@ -44,7 +57,184 @@ def rule_team_points(entry_ids, events, team_names, scope="starting_xi"):
     return results, breakdown
 
 
+def rule_named_players_points(entry_ids, events, player_names, scope="starting_xi"):
+    """Same as rule_team_points but filtering by player web_name instead of club."""
+    bs = get_bootstrap()
+    target_names = set(player_names)
+    elem_in_scope = {e["id"] for e in bs["elements"] if e["web_name"] in target_names}
+    elem_name = {e["id"]: e["web_name"] for e in bs["elements"]}
+
+    live_points = {}
+    for ev in events:
+        live = get_event_live(ev)
+        live_points[ev] = {el["id"]: el["stats"]["total_points"] for el in live["elements"]}
+
+    results = {}
+    breakdown = {}
+    for entry_id in entry_ids:
+        total = 0
+        lines = []
+        for ev in events:
+            picks = get_entry_picks(entry_id, ev)
+            for p in picks["picks"]:
+                mult = p["multiplier"]
+                if scope == "starting_xi" and mult == 0:
+                    continue
+                if scope == "full_squad" and mult == 0:
+                    mult = 1
+                if p["element"] in elem_in_scope:
+                    pts = live_points[ev].get(p["element"], 0) * mult
+                    total += pts
+                    lines.append((ev, elem_name[p["element"]], pts))
+        results[entry_id] = total
+        breakdown[entry_id] = lines
+    return results, breakdown
+
+
+def rule_overall_score(entry_ids, events):
+    """Sum of each entry's official gameweek score (net of transfer hits) over `events`."""
+    results = {}
+    breakdown = {}
+    for entry_id in entry_ids:
+        hist = get_entry_history(entry_id)
+        by_event = {h["event"]: h["points"] for h in hist["current"]}
+        total = sum(by_event.get(ev, 0) for ev in events)
+        results[entry_id] = total
+        breakdown[entry_id] = [(ev, by_event[ev]) for ev in events if ev in by_event]
+    return results, breakdown
+
+
+def rule_fixed_gameweek_score(entry_ids, fixed_event):
+    """Official score for one specific gameweek, ignoring whatever `events` the month maps to."""
+    if fixed_event not in get_playable_events():
+        return (
+            {eid: 0 for eid in entry_ids},
+            {eid: [(f"GW{fixed_event}", "not played yet")] for eid in entry_ids},
+        )
+    return rule_overall_score(entry_ids, [fixed_event])
+
+
+def rule_max_gameweek_score(entry_ids, events):
+    """Each entry's single highest official gameweek score among `events`."""
+    results = {}
+    breakdown = {}
+    for entry_id in entry_ids:
+        hist = get_entry_history(entry_id)
+        by_event = {h["event"]: h["points"] for h in hist["current"] if h["event"] in events}
+        if by_event:
+            best_event = max(by_event, key=by_event.get)
+            results[entry_id] = by_event[best_event]
+            breakdown[entry_id] = [(best_event, by_event[best_event])]
+        else:
+            results[entry_id] = 0
+            breakdown[entry_id] = []
+    return results, breakdown
+
+
+def rule_captain_points(entry_ids, events):
+    """Points contributed by whichever pick actually carried the armband each gameweek
+    (multiplier >= 2), so an auto-promoted vice-captain is credited correctly."""
+    bs = get_bootstrap()
+    elem_name = {e["id"]: e["web_name"] for e in bs["elements"]}
+
+    live_points = {}
+    for ev in events:
+        live = get_event_live(ev)
+        live_points[ev] = {el["id"]: el["stats"]["total_points"] for el in live["elements"]}
+
+    results = {}
+    breakdown = {}
+    for entry_id in entry_ids:
+        total = 0
+        lines = []
+        for ev in events:
+            picks = get_entry_picks(entry_id, ev)
+            for p in picks["picks"]:
+                mult = p["multiplier"]
+                if mult >= 2:
+                    pts = live_points[ev].get(p["element"], 0) * mult
+                    total += pts
+                    lines.append((ev, elem_name[p["element"]], pts))
+        results[entry_id] = total
+        breakdown[entry_id] = lines
+    return results, breakdown
+
+
+def rule_bench_points(entry_ids, events):
+    """Sum of points left on the bench over `events`."""
+    results = {}
+    breakdown = {}
+    for entry_id in entry_ids:
+        hist = get_entry_history(entry_id)
+        by_event = {h["event"]: h["points_on_bench"] for h in hist["current"] if h["event"] in events}
+        results[entry_id] = sum(by_event.values())
+        breakdown[entry_id] = list(by_event.items())
+    return results, breakdown
+
+
+def rule_no_chip_score(entry_ids, events):
+    """Sum of official gameweek scores over `events`, zeroed out entirely if any chip was used."""
+    results = {}
+    breakdown = {}
+    for entry_id in entry_ids:
+        hist = get_entry_history(entry_id)
+        chips_used = [c["name"] for c in hist.get("chips", []) if c["event"] in events]
+        by_event = {h["event"]: h["points"] for h in hist["current"] if h["event"] in events}
+        if chips_used:
+            results[entry_id] = 0
+            breakdown[entry_id] = [(f"DISQUALIFIED (used {', '.join(chips_used)})", 0)]
+        else:
+            results[entry_id] = sum(by_event.values())
+            breakdown[entry_id] = list(by_event.items())
+    return results, breakdown
+
+
+def _cumulative_points_at(entry_id, event_id):
+    hist = get_entry_history(entry_id)
+    by_event = {h["event"]: h["total_points"] for h in hist["current"]}
+    valid = [e for e in by_event if e <= event_id]
+    return by_event[max(valid)] if valid else 0
+
+
+def rule_climb_since_jan1(entry_ids, events):
+    """Places climbed in the league between Jan 1 and the latest played gameweek.
+
+    Ignores the passed `events` (this isn't a per-gameweek sum) - it always compares
+    the snapshot just before January's first gameweek against the most recent one played.
+    """
+    month_map = get_month_to_events()
+    playable = set(get_playable_events())
+    jan_key = next((m for m in month_map if m.endswith("-01")), None)
+
+    if not jan_key or not playable:
+        return {eid: 0 for eid in entry_ids}, {eid: [] for eid in entry_ids}
+
+    baseline_event = min(month_map[jan_key]) - 1
+    current_event = max(playable)
+
+    baseline_pts = {eid: _cumulative_points_at(eid, baseline_event) for eid in entry_ids}
+    current_pts = {eid: _cumulative_points_at(eid, current_event) for eid in entry_ids}
+
+    baseline_order = sorted(entry_ids, key=lambda e: -baseline_pts[e])
+    current_order = sorted(entry_ids, key=lambda e: -current_pts[e])
+    baseline_rank = {eid: i + 1 for i, eid in enumerate(baseline_order)}
+    current_rank = {eid: i + 1 for i, eid in enumerate(current_order)}
+
+    results = {}
+    breakdown = {}
+    for eid in entry_ids:
+        climb = baseline_rank[eid] - current_rank[eid]
+        results[eid] = climb
+        breakdown[eid] = [(f"Rank as of Jan 1 (GW{baseline_event}): {baseline_rank[eid]}",
+                            f"Rank now (GW{current_event}): {current_rank[eid]}")]
+    return results, breakdown
+
+
 MONTH_RULES = {
+    "August": {
+        "description": "Highest total score for the month — standard FPL scoring, no restrictions.",
+        "compute": lambda entry_ids, events: rule_overall_score(entry_ids, events),
+    },
     "September": {
         "description": (
             "Total points scored by promoted-team players "
@@ -54,5 +244,55 @@ MONTH_RULES = {
         "compute": lambda entry_ids, events: rule_team_points(
             entry_ids, events, PROMOTED_TEAMS_SEPTEMBER, scope="starting_xi"
         ),
+    },
+    "October": {
+        "description": "Highest single gameweek score within the month (not summed across the month).",
+        "compute": lambda entry_ids, events: rule_max_gameweek_score(entry_ids, events),
+    },
+    "November": {
+        "description": (
+            "Most points from the captained pick each gameweek (armband, doubled/tripled as scored — "
+            "credited to the vice-captain if an autosub promotion occurred)."
+        ),
+        "compute": lambda entry_ids, events: rule_captain_points(entry_ids, events),
+    },
+    "December": {
+        "description": "Highest score in Gameweek 17 only, regardless of December's other fixtures.",
+        "compute": lambda entry_ids, events: rule_fixed_gameweek_score(entry_ids, 17),
+    },
+    "January": {
+        "description": (
+            "Total points scored by London-club players (Arsenal, Chelsea, Crystal Palace, Fulham, "
+            "Spurs, Brentford, West Ham) in each manager's starting XI."
+        ),
+        "compute": lambda entry_ids, events: rule_team_points(entry_ids, events, LONDON_TEAMS, scope="starting_xi"),
+    },
+    "February": {
+        "description": "Highest total points left on the bench for the month.",
+        "compute": lambda entry_ids, events: rule_bench_points(entry_ids, events),
+    },
+    "March": {
+        "description": "Highest points from Irish, Scottish and Welsh players.",
+        "warning": (
+            "Player eligibility list is not populated yet. The FPL API has no nationality field, "
+            "so this list has to be manually maintained — everyone will show 0 until it's filled in."
+            if not IRISH_SCOTTISH_WELSH_PLAYERS
+            else None
+        ),
+        "compute": lambda entry_ids, events: rule_named_players_points(
+            entry_ids, events, IRISH_SCOTTISH_WELSH_PLAYERS, scope="starting_xi"
+        ),
+    },
+    "April": {
+        "description": (
+            "Highest score for the month using no chips at all. "
+            "If any chip (Wildcard, Free Hit, Bench Boost, Triple Captain) is used during "
+            "the month, that manager scores 0 for April."
+        ),
+        "compute": lambda entry_ids, events: rule_no_chip_score(entry_ids, events),
+    },
+    "May": {
+        "description": "Most league places climbed between January 1st and the latest completed gameweek.",
+        "compute": lambda entry_ids, events: rule_climb_since_jan1(entry_ids, events),
     },
 }

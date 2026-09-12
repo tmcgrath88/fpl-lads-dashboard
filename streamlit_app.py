@@ -32,6 +32,34 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+APP_PASSWORD_DEFAULT = "NODAYSOFF"
+
+
+def check_password():
+    def password_entered():
+        try:
+            correct = st.secrets["APP_PASSWORD"]
+        except Exception:
+            correct = APP_PASSWORD_DEFAULT
+        if st.session_state["password_input"] == correct:
+            st.session_state["password_correct"] = True
+            del st.session_state["password_input"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if st.session_state.get("password_correct"):
+        return True
+
+    st.title("⚽ The Lads — Monthly Table")
+    st.text_input("Password", type="password", on_change=password_entered, key="password_input")
+    if st.session_state.get("password_correct") is False:
+        st.error("Incorrect password")
+    return False
+
+
+if not check_password():
+    st.stop()
+
 st.title("⚽ The Lads — Monthly Table")
 
 standings = get_league_standings(LEAGUE_ID)
@@ -84,6 +112,8 @@ elif not usable_events:
     st.info("This month's gameweeks haven't started yet — check back once the first deadline passes.")
 else:
     st.markdown(f"<div class='rule-box'>📋 <b>Rule:</b> {rule['description']}</div>", unsafe_allow_html=True)
+    if rule.get("warning"):
+        st.warning(rule["warning"])
 
     with st.spinner("Pulling live data from the FPL API..."):
         results, breakdown = rule["compute"](list(entries.keys()), usable_events)
@@ -103,8 +133,8 @@ else:
             label = f"{entries[eid]['manager']} — {entries[eid]['team']} ({results[eid]} pts)"
             st.markdown(f"**{label}**")
             if lines:
-                for ev, name, pts in lines:
-                    st.write(f"GW{ev}: {name} = {pts} pts")
+                for line in lines:
+                    st.write(" — ".join(str(x) for x in line))
             else:
                 st.write("_No qualifying players this month_")
 

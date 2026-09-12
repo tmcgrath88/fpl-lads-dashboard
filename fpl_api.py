@@ -42,6 +42,13 @@ def get_entry_picks(entry_id, event):
     return r.json()
 
 
+@st.cache_data(ttl=300)
+def get_entry_history(entry_id):
+    r = requests.get(f"{BASE}/entry/{entry_id}/history/", headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
 @st.cache_data(ttl=1800)
 def get_month_to_events():
     """Map 'YYYY-MM' -> sorted gameweek ids that have at least one fixture in that month."""
